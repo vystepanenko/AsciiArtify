@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+#
+# kubectl-kubeplugin: CPU and memory usage of pods or nodes, one line per object:
+#   Resource, Namespace, Name, CPU, Memory
+#
+# Install (kubectl runs any executable named kubectl-<name> found in PATH):
+#   ln -s "$(pwd)/scripts/kubeplugin" ~/.local/bin/kubectl-kubeplugin
+#   kubectl plugin list
+#
+# Usage:
+#   kubectl kubeplugin <pod|node> [-n NAMESPACE] [--no-headers]
+#
+# Requires metrics-server in the cluster (bundled with k3s / k3d).
+# Uses the current kubectl context: check it with `kubectl config current-context`.
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: kubectl kubeplugin <pod|node> [-n NAMESPACE] [--no-headers]
+
+Show CPU and memory usage as: Resource, Namespace, Name, CPU, Memory
+
+Arguments:
+  pod|node              resource type (aliases: pods, po, nodes, no)
+
+Options:
+  -n, --namespace NS    namespace of the pods (default: namespace of the current context)
+      --no-headers      don't print the header line
+  -h, --help            show this help
+
+Examples:
+  kubectl kubeplugin pod -n kube-system
+  kubectl kubeplugin node
+EOF
+}
+
+die() {
+  echo "error: $*" >&2
+  echo >&2
+  usage >&2
+  exit 1
+}
+
+resource=""
+namespace=""
+headers=true
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -n|--namespace)
+      [[ $# -ge 2 && -n $2 ]] || die "flag needs an argument: $1"
+      namespace=$2
+      shift 2
+      ;;
+    --namespace=*)
+      namespace=${1#*=}
+      [[ -n $namespace ]] || die "flag needs an argument: --namespace"
+      shift
+      ;;
+    --no-headers)
+      headers=false
+      shift
+      ;;
+    -*)
+      die "unknown flag: $1"
+      ;;
+    *)
+      [[ -z $resource ]] || die "unexpected argument: $1"
+      resource=$1
+      shift
+      ;;
+  esac
+done
+
+case "$resource" in
+  pod|pods|po)   resource=pod ;;
+  node|nodes|no) resource=node ;;
+  "")            die "resource type is required" ;;
+  *)             die "unsupported resource type: $resource (expected pod or node)" ;;
+esac
+
+print_header() {
+  [[ $headers == true ]] || return 0
+  echo "Resource, Namespace, Name, CPU, Memory"
+}
+
+print_pods() {
+  local stats name cpu memory
+  stats=$(kubectl top pod --namespace "$namespace" --no-headers)
+  [[ -n $stats ]] || return 0
+  print_header
+
+  while read -r name cpu memory _; do
+    echo "pod, $namespace, $name, $cpu, $memory"
+  done <<<"$stats"
+}
+
+print_nodes() {
+  local stats name cpu memory
+  stats=$(kubectl top node --no-headers)
+  [[ -n $stats ]] || return 0
+  print_header
+
+  # Columns: NAME CPU(cores) CPU(%) MEMORY(bytes) MEMORY(%)
+  while read -r name cpu _ memory _; do
+    echo "node, -, $name, $cpu, $memory"
+  done <<<"$stats"
+}
+
+if [[ $resource == node ]]; then
+  [[ -z $namespace ]] || die "nodes are cluster-scoped, -n is not allowed"
+  print_nodes
+else
+  if [[ -z $namespace ]]; then
+    namespace=$(kubectl config view --minify --output 'jsonpath={..namespace}')
+    namespace=${namespace:-default}
+  fi
+  print_pods
+fi
